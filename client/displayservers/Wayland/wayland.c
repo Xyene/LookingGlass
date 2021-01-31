@@ -108,7 +108,10 @@ struct WCBTransfer
 {
   void * data;
   size_t size;
+  size_t pos;
   const char ** mimetypes;
+
+  struct wl_event_source * event_source;
 };
 
 struct WCBState
@@ -1124,6 +1127,32 @@ static bool waylandCBInit(void)
   return true;
 }
 
+static int writeSelection(int fd, uint32_t mask, void * data)
+{
+  struct WCBTransfer * transfer = (struct WCBTransfer *) data;
+
+  size_t remainder = transfer->size - transfer->pos;
+  size_t written = write(fd, transfer->data + transfer->pos, remainder);
+  if (written < 0)
+  {
+    if (errno != EPIPE)
+      DEBUG_ERROR("Failed to write clipboard data: %s", strerror(errno));
+    close(fd);
+    wl_event_source_remove(transfer->event_source);
+    return 0;
+  }
+
+  if (written < remainder)
+  {
+    transfer->pos += written;
+    return 1;
+  }
+
+  close(fd);
+  wl_event_source_remove(transfer->event_source);
+  return 0;
+}
+
 static void dataSourceHandleSend(void * data, struct wl_data_source * source,
     const char * mimetype, int fd)
 {
@@ -1132,28 +1161,19 @@ static void dataSourceHandleSend(void * data, struct wl_data_source * source,
     wcb.isSelfCopy = true;
   else if (containsMimetype(transfer->mimetypes, mimetype))
   {
-    // Consider making this do non-blocking sends to not stall the Wayland
-    // event loop if it becomes a problem. This is "fine" in the sense that
-    // wl-copy also stalls like this, but it's not necessary.
-    fcntl(fd, F_SETFL, 0);
+    fcntl(fd, F_SETFL, O_WRONLY | O_NONBLOCK);
 
-    size_t pos = 0;
-    while (pos < transfer->size)
-    {
-      ssize_t written = write(fd, transfer->data + pos, transfer->size - pos);
-      if (written < 0)
-      {
-        if (errno != EPIPE)
-          DEBUG_ERROR("Failed to write clipboard data: %s", strerror(errno));
-        goto error;
-      }
-
-      pos += written;
-    }
+    bool requestor_finished_consuming =
+      !writeSelection(fd, WL_EVENT_WRITABLE, transfer);
+    if (!requestor_finished_consuming)
+      transfer->event_source = wl_event_loop_add_fd(
+          wl_display_get_event_loop(wm.display),
+          fd,
+          WL_EVENT_WRITABLE,
+          writeSelection,
+          transfer
+      );
   }
-
-error:
-  close(fd);
 }
 
 static void dataSourceHandleCancelled(void * data,
@@ -1173,7 +1193,7 @@ static const struct wl_data_source_listener dataSourceListener = {
 static void waylandCBReplyFn(void * opaque, LG_ClipboardData type,
    	uint8_t * data, uint32_t size)
 {
-  struct WCBTransfer * transfer = malloc(sizeof(struct WCBTransfer));
+  struct WCBTransfer * transfer = calloc(1, sizeof(struct WCBTransfer));
   void * dataCopy = malloc(size);
   memcpy(dataCopy, data, size);
   *transfer = (struct WCBTransfer) {
