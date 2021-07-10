@@ -53,6 +53,8 @@ typedef struct Texture
   ID3D11Texture2D          * tex;
   D3D11_MAPPED_SUBRESOURCE   map;
   uint64_t                   copyTime;
+  uint8_t                    damageRectsCount;
+  RECT                       damageRects[KVMFR_MAX_DAMAGE_RECTS];
 }
 Texture;
 
@@ -142,7 +144,7 @@ static void dxgi_initOptions(void)
     {
       .module         = "dxgi",
       .name           = "useAcquireLock",
-      .description    = "Enable locking around `AcquireFrame` (EXPERIMENTAL, leave enabled if you're not sure!)",
+      .description    = "Enable locking around `AcquireNextFrame` (EXPERIMENTAL, leave enabled if you're not sure!)",
       .type           = OPTION_TYPE_BOOL,
       .value.x_bool   = true
     },
@@ -781,6 +783,15 @@ static CaptureResult dxgi_capture(void)
         tex->copyTime = microtime();
         ID3D11DeviceContext_CopyResource(this->deviceContext,
           (ID3D11Resource *)tex->tex, (ID3D11Resource *)src);
+
+        UINT damageRectsBufferSizeRequired;
+        if (ID3D11DeviceContext_GetFrameDirtyRects(KVMFR_MAX_DAMAGE_RECTS,
+            tex->damageRects, &damageRectsBufferSizeRequired) == S_OK)
+          tex->damageRectsCount = damageRectsBufferSizeRequired / sizeof(*tex->damageRects);
+        else
+          // Either received too many damage regions or hit another error;
+          // damage the full frame instead.
+          tex->damageRectsCount = 0;
       }
 
       if (copyPointer)
@@ -881,7 +892,7 @@ static CaptureResult dxgi_waitFrame(CaptureFrame * frame, const size_t maxFrameS
   assert(this->initialized);
 
   // NOTE: the event may be signaled when there are no frames available
-  if(atomic_load_explicit(&this->texReady, memory_order_acquire) == 0)
+  if (atomic_load_explicit(&this->texReady, memory_order_acquire) == 0)
   {
     if (!lgWaitEvent(this->frameEvent, 1000))
       return CAPTURE_RESULT_TIMEOUT;
@@ -929,14 +940,26 @@ static CaptureResult dxgi_waitFrame(CaptureFrame * frame, const size_t maxFrameS
 
   const unsigned int maxHeight = maxFrameSize / this->pitch;
 
-  frame->formatVer  = tex->formatVer;
-  frame->width      = this->width;
-  frame->height     = maxHeight > this->height ? this->height : maxHeight;
-  frame->realHeight = this->height;
-  frame->pitch      = this->pitch;
-  frame->stride     = this->stride;
-  frame->format     = this->format;
-  frame->rotation   = this->rotation;
+  frame->formatVer        = tex->formatVer;
+  frame->width            = this->width;
+  frame->height           = maxHeight > this->height ? this->height : maxHeight;
+  frame->realHeight       = this->height;
+  frame->pitch            = this->pitch;
+  frame->stride           = this->stride;
+  frame->format           = this->format;
+  frame->rotation         = this->rotation;
+
+  frame->damageRectsCount = tex->damageRectsCount;
+  for (int i = 0; i < tex->damageRectsCount; i++)
+  {
+    RECT damageRect = tex->damageRects[i];
+    frame->damageRects[i] = (KVMFrameDamageRect) {
+      .x = damageRect.left,
+      .y = damageRect.top,
+      .width = damageRect.right - damageRect.left,
+      .height = damageRect.bottom - damageRect.top
+    };
+  }
 
   atomic_fetch_sub_explicit(&this->texReady, 1, memory_order_release);
   return CAPTURE_RESULT_OK;

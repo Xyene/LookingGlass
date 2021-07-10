@@ -455,6 +455,16 @@ int main_frameThread(void * unused)
           size);
       }
 
+			DEBUG_WARN("%d damage rects provided\n", frame->damageRectsCount);
+			for (int i = 0; i < frame->damageRectsCount; i++) {
+				DEBUG_WARN("frame damage [%d, %d] x [%d, %d]\n",
+						frame->damageRects[i].x,
+						frame->damageRects[i].y,
+						frame->damageRects[i].width,
+						frame->damageRects[i].height
+				);
+			}
+
       switch(frame->rotation)
       {
         case FRAME_ROT_0  : lgrFormat.rotate = LG_ROTATE_0  ; break;
